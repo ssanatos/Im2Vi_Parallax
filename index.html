@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>패럴랙스 영상 만들기</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--line:#2a2f3a;--tx:#e8eaf0;--mut:#8b93a5;--ac:#6ea8ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 -apple-system,"Noto Sans KR","Malgun Gothic",sans-serif}
+header{padding:18px 20px 6px}
+h1{margin:0;font-size:20px}
+header p{margin:4px 0 0;color:var(--mut)}
+main{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;padding:14px 20px 40px;max-width:1200px;margin:auto}
+@media(max-width:860px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+#drop{border:2px dashed var(--line);border-radius:12px;padding:22px;text-align:center;color:var(--mut);cursor:pointer;transition:.15s}
+#drop.on,#drop:hover{border-color:var(--ac);color:var(--tx)}
+#stage{display:flex;justify-content:center;align-items:center;min-height:200px;background:#000;border-radius:8px;margin-top:12px;overflow:hidden}
+canvas{max-width:100%;max-height:62vh;display:block}
+#list{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.th{position:relative;width:72px;height:72px;border-radius:8px;overflow:hidden;border:2px solid transparent;cursor:pointer}
+.th.sel{border-color:var(--ac)}
+.th img{width:100%;height:100%;object-fit:cover}
+.th b{position:absolute;top:2px;right:2px;background:#000a;color:#fff;border-radius:50%;width:18px;height:18px;text-align:center;line-height:18px;font-size:12px}
+h3{margin:14px 0 8px;font-size:13px;color:var(--mut);font-weight:600}
+h3:first-child{margin-top:0}
+.row{display:flex;align-items:center;gap:8px;margin:7px 0}
+.row label{flex:0 0 108px;color:var(--tx)}
+.row input[type=range]{flex:1;min-width:0}
+.row output{flex:0 0 52px;text-align:right;color:var(--mut);font-variant-numeric:tabular-nums}
+select{flex:1;background:#0f1115;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:5px}
+button{background:var(--ac);color:#06101f;border:0;border-radius:8px;padding:10px 12px;font-weight:700;cursor:pointer;width:100%;margin-top:8px}
+button.sec{background:#262b36;color:var(--tx)}
+button:disabled{opacity:.5;cursor:wait}
+#bar{height:6px;background:#262b36;border-radius:3px;margin-top:10px;overflow:hidden}
+#bar i{display:block;height:100%;width:0;background:var(--ac)}
+#st{color:var(--mut);margin-top:6px;min-height:20px;font-size:12px}
+.chk{display:flex;gap:14px;margin:6px 0}
+.chk label{display:flex;gap:5px;align-items:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>패럴랙스 영상 만들기</h1>
+  <p>이미지 → 깊이 추정 → 시차(Parallax) 영상. 모든 처리는 브라우저 안에서만 이루어지며 이미지는 서버로 전송되지 않습니다.</p>
+</header>
+<main>
+  <section>
+    <div id="drop">이미지를 끌어다 놓거나 클릭해서 선택 (여러 장 가능)</div>
+    <input id="file" type="file" accept="image/*" multiple hidden>
+    <div id="list"></div>
+    <div id="stage"><canvas id="cv"></canvas></div>
+  </section>
+  <aside class="card">
+    <h3>효과</h3><div id="c1"></div>
+    <h3>깊이 맵</h3><div id="c2"></div>
+    <div class="chk">
+      <label><input type="checkbox" id="inv"> 깊이 반전</label>
+      <label><input type="checkbox" id="sd"> 깊이 맵 보기</label>
+    </div>
+    <h3>내보내기</h3><div id="c3"></div>
+    <button id="b1" class="">현재 이미지 다운로드</button>
+    <button id="b2" class="sec">전체 이미지 다운로드</button>
+    <div id="bar"><i></i></div>
+    <div id="st"></div>
+  </aside>
+</main>
+
+<script type="module">
+/* ---------- 설정 ---------- */
+const LIB={
+  tf:'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2',
+  mux:'https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/+esm',
+  gif:'https://cdn.jsdelivr.net/npm/gifenc@1.0.3/+esm'
+};
+const SLIDERS=[ // key,label,min,max,step,default,unit
+  ['str','이동 강도',0,100,1,40,''],
+  ['ay','세로 이동 비율',0,150,5,100,'%'],
+  ['zoom','확대 (가장자리 숨김)',100,160,1,112,'%'],
+  ['focus','초점 깊이',0,100,1,40,''],
+  ['dz','돌리 줌 강도',0,60,1,25,''],
+  ['dur','영상 길이',1,10,0.5,3,'초']
+];
+const DEPTH_SL=[
+  ['con','깊이 대비',50,300,5,130,'%'],
+  ['blur','깊이 부드럽게',0,20,1,2,'px']
+];
+const SELECTS=[
+  ['c1','motion','움직임',[['circle','원형'],['h','좌우'],['v','상하'],['eight','8자'],['dolly','돌리 줌 (앞뒤)']],'circle'],
+  ['c2','dsrc','깊이 추정',[['ai','AI (정확, 첫 사용 시 모델 다운로드)'],['lum','밝기 기반 (빠름)'],['center','중앙이 가까움'],['bottom','아래쪽이 가까움']],'ai'],
+  ['c3','fmt','형식',[['mp4','MP4'],['gif','GIF']],'mp4'],
+  ['c3','mres','MP4 해상도',[['720','720p'],['1080','1080p'],['1440','1440p']],'1080'],
+  ['c3','mfps','MP4 FPS',[['24','24'],['30','30'],['60','60']],'30'],
+  ['c3','gres','GIF 크기',[['320','320px'],['480','480px'],['640','640px'],['800','800px']],'480'],
+  ['c3','gfps','GIF FPS',[['10','10'],['15','15'],['20','20']],'15'],
+  ['c3','gcol','GIF 색상 수',[['64','64'],['128','128'],['256','256']],'128']
+];
+
+/* ---------- UI 생성 ---------- */
+const $=id=>document.getElementById(id), P={};
+let stamp=0;
+function addSlider(box,[k,l,mi,ma,s,d,u]){
+  P[k]=d;
+  const r=document.createElement('div'); r.className='row';
+  r.innerHTML=`<label>${l}</label><input type="range" min="${mi}" max="${ma}" step="${s}" value="${d}"><output>${d}${u}</output>`;
+  const i=r.querySelector('input'),o=r.querySelector('output');
+  i.oninput=()=>{P[k]=+i.value;o.textContent=i.value+u;if(DEPTH_SL.some(x=>x[0]===k))stamp++};
+  $(box).append(r);
+}
+SLIDERS.forEach(s=>addSlider('c1',s));
+DEPTH_SL.forEach(s=>addSlider('c2',s));
+SELECTS.forEach(([box,k,l,opts,d])=>{
+  P[k]=d;
+  const r=document.createElement('div'); r.className='row';
+  r.innerHTML=`<label>${l}</label><select>${opts.map(o=>`<option value="${o[0]}">${o[1]}</option>`).join('')}</select>`;
+  const s=r.querySelector('select'); s.value=d;
+  s.onchange=()=>{P[k]=s.value;if(k==='dsrc')stamp++;toggleFmt()};
+  $(box).append(r);
+});
+function toggleFmt(){
+  const rows=[...$('c3').children];
+  rows.forEach((r,i)=>{ if(i===0)return; const mp=i<=2; r.style.display=(mp===(P.fmt==='mp4'))?'':'none'; });
+}
+toggleFmt();
+P.inv=false;P.sd=false;
+$('inv').onchange=e=>{P.inv=e.target.checked;stamp++};
+$('sd').onchange=e=>{P.sd=e.target.checked};
+const st=t=>$('st').textContent=t, pg=f=>$('bar').firstElementChild.style.width=(f*100)+'%';
+
+/* ---------- WebGL ---------- */
+const cv=$('cv');
+const gl=cv.getContext('webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+const mk=(t,s)=>{const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);return o};
+const pr=gl.createProgram();
+gl.attachShader(pr,mk(gl.VERTEX_SHADER,'attribute vec2 p;varying vec2 v;void main(){v=p*.5+.5;gl_Position=vec4(p,0,1);}'));
+gl.attachShader(pr,mk(gl.FRAGMENT_SHADER,`precision highp float;
+uniform sampler2D img,dep;uniform vec2 off;uniform float focus,zoom,dz,sd;varying vec2 v;
+void main(){
+  vec2 uv=(v-.5)/zoom+.5, p=uv;
+  for(int i=0;i<6;i++){
+    float d=texture2D(dep,p).r-focus;
+    p=uv-off*d-(uv-.5)*dz*d;
+  }
+  p=clamp(p,0.,1.);
+  vec3 c=texture2D(img,p).rgb;
+  if(sd>.5)c=vec3(texture2D(dep,p).r);
+  gl_FragColor=vec4(c,1);
+}`));
+gl.linkProgram(pr);gl.useProgram(pr);
+gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+const loc=gl.getAttribLocation(pr,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+const U=n=>gl.getUniformLocation(pr,n);
+const tex=[0,1].map(i=>{
+  const t=gl.createTexture();gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,t);
+  [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]].forEach(([a,b])=>gl.texParameteri(gl.TEXTURE_2D,a,b));
+  return t;
+});
+gl.uniform1i(U('img'),0);gl.uniform1i(U('dep'),1);
+gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+const up={it:null,v:-1};
+
+function motion(m,t){
+  const a=2*Math.PI*t;
+  switch(m){
+    case 'circle':return[Math.cos(a),Math.sin(a),0];
+    case 'h':return[Math.sin(a),0,0];
+    case 'v':return[0,Math.sin(a),0];
+    case 'eight':return[Math.sin(a),Math.sin(2*a)*.6,0];
+    default:return[0,0,Math.sin(a)];
+  }
+}
+function render(it,t,w,h){
+  ensureDepth(it);
+  if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h}
+  gl.viewport(0,0,w,h);
+  if(up.it!==it){gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tex[0]);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,it.src);up.it=it;up.v=-1}
+  if(up.v!==it.v){gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,tex[1]);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,it.dc);up.v=it.v}
+  const [mx,my,mz]=motion(P.motion,t), s=P.str/1000;
+  gl.uniform2f(U('off'),s*mx,s*my*(w/h)*P.ay/100);
+  gl.uniform1f(U('focus'),P.focus/100);
+  gl.uniform1f(U('zoom'),P.zoom/100);
+  gl.uniform1f(U('dz'),P.motion==='dolly'?mz*P.dz/100:0);
+  gl.uniform1f(U('sd'),P.sd?1:0);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+}
+
+/* ---------- 깊이 맵 ---------- */
+function blur1(src,dst,W,H,r,vert){
+  const n=vert?H:W,m=vert?W:H,st=vert?W:1,ls=vert?1:W,w=2*r+1;
+  for(let l=0;l<m;l++){
+    const b=l*ls;let s=0;
+    for(let k=-r;k<=r;k++)s+=src[b+Math.min(n-1,Math.max(0,k))*st];
+    for(let i=0;i<n;i++){
+      dst[b+i*st]=s/w;
+      s+=src[b+Math.min(n-1,i+r+1)*st]-src[b+Math.max(0,i-r)*st];
+    }
+  }
+}
+function ensureDepth(it){
+  if(P.dsrc==='ai'&&!it.ai&&!it.fail)getAI(it);
+  if(it.ds===stamp)return;
+  it.ds=stamp;it.v++;
+  const m=P.dsrc,useAI=m==='ai'&&it.ai;
+  const k=Math.min(1,512/Math.max(it.w,it.h));
+  let W=Math.round(it.w*k),H=Math.round(it.h*k),a;
+  if(useAI||m==='lum'||m==='ai'){
+    const sc=useAI?it.ai:it.src;if(useAI){W=sc.width;H=sc.height}
+    const t=document.createElement('canvas');t.width=W;t.height=H;
+    const x=t.getContext('2d',{willReadFrequently:true});x.drawImage(sc,0,0,W,H);
+    const d=x.getImageData(0,0,W,H).data;a=new Float32Array(W*H);
+    for(let i=0;i<a.length;i++)a[i]=useAI?d[i*4]/255:(.299*d[i*4]+.587*d[i*4+1]+.114*d[i*4+2])/255;
+  }else{
+    a=new Float32Array(W*H);
+    for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+      if(m==='bottom')a[y*W+x]=y/(H-1);
+      else{const dx=(x/W-.5)*2,dy=(y/H-.5)*2,r=Math.min(1,Math.hypot(dx,dy)/1.1);a[y*W+x]=1-r*r*(3-2*r);}
+    }
+  }
+  const c=P.con/100;
+  for(let i=0;i<a.length;i++){let v=(a[i]-.5)*c+.5;v=v<0?0:v>1?1:v;a[i]=P.inv?1-v:v}
+  if(P.blur>0){const t=new Float32Array(a.length);blur1(a,t,W,H,P.blur,false);blur1(t,a,W,H,P.blur,true)}
+  const dc=it.dc||(it.dc=document.createElement('canvas'));dc.width=W;dc.height=H;
+  const x=dc.getContext('2d'),im=x.createImageData(W,H);
+  for(let i=0;i<a.length;i++){const v=a[i]*255;im.data[i*4]=im.data[i*4+1]=im.data[i*4+2]=v;im.data[i*4+3]=255}
+  x.putImageData(im,0,0);
+}
+
+/* ---------- AI 깊이 (Depth Anything V2 small, transformers.js) ---------- */
+let pipeP=null,aiChain=Promise.resolve();
+function getAI(it){return it.aiP||(it.aiP=(aiChain=aiChain.then(()=>runAI(it))))}
+async function runAI(it){
+  try{
+    st('AI 깊이 모델 준비 중… (최초 1회 약 30MB 다운로드)');
+    pipeP??=import(LIB.tf).then(({pipeline})=>pipeline('depth-estimation','onnx-community/depth-anything-v2-small',{
+      progress_callback:p=>{if(p.status==='progress')st('모델 다운로드 '+Math.round(p.progress)+'%')}
+    }));
+    const pipe=await pipeP;
+    st('깊이 분석 중…');
+    const {depth}=await pipe(it.url);
+    const c=document.createElement('canvas');c.width=depth.width;c.height=depth.height;
+    const x=c.getContext('2d'),im=x.createImageData(c.width,c.height),ch=depth.channels||1;
+    for(let i=0;i<c.width*c.height;i++){const v=depth.data[i*ch];im.data[i*4]=im.data[i*4+1]=im.data[i*4+2]=v;im.data[i*4+3]=255}
+    x.putImageData(im,0,0);it.ai=c;stamp++;st('');
+  }catch(e){
+    console.error(e);it.fail=1;pipeP=null;stamp++;
+    st('AI 깊이 실패 → 밝기 기반으로 대체했어요 ('+(e.message||e)+')');
+  }
+}
+
+/* ---------- 이미지 목록 ---------- */
+const items=[];let cur=null,busy=false;
+const drop=$('drop'),file=$('file');
+drop.onclick=()=>file.click();
+file.onchange=()=>{addFiles(file.files);file.value=''};
+['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('on')}));
+['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove('on')}));
+drop.addEventListener('drop',ev=>addFiles(ev.dataTransfer.files));
+async function addFiles(fs){
+  for(const f of fs){
+    if(!f.type.startsWith('image/'))continue;
+    const url=URL.createObjectURL(f),im=new Image();im.src=url;
+    try{await im.decode()}catch{continue}
+    const k=Math.min(1,2048/Math.max(im.naturalWidth,im.naturalHeight));
+    const c=document.createElement('canvas');c.width=Math.round(im.naturalWidth*k);c.height=Math.round(im.naturalHeight*k);
+    c.getContext('2d').drawImage(im,0,0,c.width,c.height);
+    items.push({name:f.name.replace(/\.[^.]+$/,''),url,src:c,w:c.width,h:c.height,ds:-1,v:0});
+  }
+  if(!cur&&items.length)cur=items[0];
+  list();
+}
+function list(){
+  const L=$('list');L.innerHTML='';
+  items.forEach(it=>{
+    const d=document.createElement('div');d.className='th'+(it===cur?' sel':'');
+    d.innerHTML=`<img src="${it.url}"><b title="삭제">×</b>`;
+    d.onclick=()=>{cur=it;list()};
+    d.querySelector('b').onclick=e=>{
+      e.stopPropagation();items.splice(items.indexOf(it),1);
+      if(up.it===it)up.it=null;
+      if(cur===it)cur=items[0]||null;list();
+    };
+    L.append(d);
+  });
+}
+
+/* ---------- 미리보기 루프 ---------- */
+(function loop(){
+  if(!busy&&cur){
+    const k=Math.min(1,720/Math.max(cur.w,cur.h));
+    render(cur,(performance.now()/1000/P.dur)%1,Math.round(cur.w*k),Math.round(cur.h*k));
+  }
+  requestAnimationFrame(loop);
+})();
+
+/* ---------- 내보내기 ---------- */
+const even=n=>Math.max(2,Math.round(n/2)*2);
+const tick=()=>new Promise(r=>setTimeout(r));
+function save(blob,name){
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;
+  document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),10000);
+}
+async function exportItem(it,label=''){
+  const mp=P.fmt==='mp4',mx=+(mp?P.mres:P.gres),fps=+(mp?P.mfps:P.gfps);
+  const k=Math.min(1,mx/Math.max(it.w,it.h)),w=even(it.w*k),h=even(it.h*k);
+  const n=Math.max(2,Math.round(P.dur*fps));
+  if(P.dsrc==='ai'){st(label+'AI 깊이 분석 중…');await getAI(it)}
+  ensureDepth(it);
+  let blob;
+  if(mp){
+    if(typeof VideoEncoder==='undefined')throw new Error('이 브라우저는 MP4 인코딩(WebCodecs)을 지원하지 않아요. 최신 Chrome/Edge/Safari를 쓰거나 GIF를 선택하세요.');
+    const {Muxer,ArrayBufferTarget}=await import(LIB.mux);
+    const bitrate=Math.min(40e6,Math.max(2e6,w*h*fps*.12));
+    let cfg=null;
+    for(const codec of ['avc1.640034','avc1.64002a','avc1.4d002a','avc1.42002a']){
+      const c={codec,width:w,height:h,bitrate,framerate:fps};
+      if((await VideoEncoder.isConfigSupported(c)).supported){cfg=c;break}
+    }
+    if(!cfg)throw new Error('이 해상도의 H.264 인코딩을 지원하지 않아요. 해상도를 낮춰 보세요.');
+    const target=new ArrayBufferTarget();
+    const mux=new Muxer({target,video:{codec:'avc',width:w,height:h},fastStart:'in-memory'});
+    let err=null;
+    const enc=new VideoEncoder({output:(c,m)=>mux.addVideoChunk(c,m),error:e=>err=e});
+    enc.configure(cfg);
+    for(let i=0;i<n;i++){
+      if(err)throw err;
+      render(it,i/n,w,h);
+      const f=new VideoFrame(cv,{timestamp:Math.round(i*1e6/fps),duration:Math.round(1e6/fps)});
+      enc.encode(f,{keyFrame:i%fps===0});f.close();
+      while(enc.encodeQueueSize>6)await tick();
+      pg((i+1)/n);if(i%4===0){st(`${label}MP4 인코딩 ${i+1}/${n}`);await tick()}
+    }
+    await enc.flush();mux.finalize();
+    blob=new Blob([target.buffer],{type:'video/mp4'});
+  }else{
+    const {GIFEncoder,quantize,applyPalette}=await import(LIB.gif);
+    const g=GIFEncoder(),c2=document.createElement('canvas');c2.width=w;c2.height=h;
+    const x=c2.getContext('2d',{willReadFrequently:true});
+    let pal=null;
+    for(let i=0;i<n;i++){
+      render(it,i/n,w,h);x.drawImage(cv,0,0);
+      const d=x.getImageData(0,0,w,h).data;
+      pal??=quantize(d,+P.gcol);
+      g.writeFrame(applyPalette(d,pal),w,h,{palette:i?undefined:pal,delay:Math.round(1000/fps),repeat:0});
+      pg((i+1)/n);if(i%2===0){st(`${label}GIF 인코딩 ${i+1}/${n}`);await tick()}
+    }
+    g.finish();blob=new Blob([g.bytes()],{type:'image/gif'});
+  }
+  save(blob,`${it.name}_parallax.${mp?'mp4':'gif'}`);
+}
+async function run(list){
+  if(busy)return;
+  if(!list.length){st('먼저 이미지를 올려주세요.');return}
+  busy=true;$('b1').disabled=$('b2').disabled=true;
+  try{
+    for(let i=0;i<list.length;i++){
+      const lb=list.length>1?`[${i+1}/${list.length}] `:'';
+      pg(0);await exportItem(list[i],lb);
+      if(i<list.length-1)await new Promise(r=>setTimeout(r,600)); // 연속 다운로드 간격
+    }
+    st('완료! 다운로드 폴더를 확인하세요.');
+  }catch(e){console.error(e);st('오류: '+(e.message||e))}
+  busy=false;$('b1').disabled=$('b2').disabled=false;
+}
+$('b1').onclick=()=>run(cur?[cur]:[]);
+$('b2').onclick=()=>run(items.slice());
+</script>
+</body>
+</html>
